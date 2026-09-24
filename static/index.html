@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BC Up/Down Pattern Analyzer</title>
+  <style>
+    :root {
+      --bg: #0b1016;
+      --panel: #141b24;
+      --line: #243041;
+      --text: #e8eef6;
+      --muted: #8aa0b8;
+      --up: #22c55e;
+      --down: #ef4444;
+      --up-soft: rgba(34,197,94,.18);
+      --down-soft: rgba(239,68,68,.18);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", "IBM Plex Sans", system-ui, sans-serif;
+      background:
+        radial-gradient(900px 420px at 0% 0%, #163024 0%, transparent 55%),
+        radial-gradient(800px 400px at 100% 0%, #2a1520 0%, transparent 50%),
+        var(--bg);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 22px 20px 48px; }
+    h1 { margin: 0; font-size: 1.45rem; font-weight: 700; letter-spacing: .01em; }
+    .sub { color: var(--muted); margin: 6px 0 16px; font-size: .92rem; }
+
+    .bar {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: end;
+      padding: 12px; border: 1px solid var(--line); border-radius: 12px;
+      background: color-mix(in srgb, var(--panel) 90%, transparent);
+      margin-bottom: 14px;
+    }
+    label { display: grid; gap: 4px; font-size: .75rem; color: var(--muted); }
+    input, button {
+      font: inherit; border-radius: 8px; border: 1px solid var(--line);
+      background: #0f151c; color: var(--text); padding: 8px 11px;
+    }
+    button {
+      background: linear-gradient(180deg, #2f6f47, #215536);
+      border-color: #3d8a59; font-weight: 650; cursor: pointer;
+    }
+    button.stop { background: linear-gradient(180deg, #8a3a3a, #6a2929); border-color: #a05050; }
+    button.ghost { background: #151c25; border-color: var(--line); }
+    button:disabled { opacity: .55; cursor: wait; }
+    .live {
+      margin-left: auto; font-size: .82rem; color: var(--muted);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #666;
+      box-shadow: 0 0 0 0 rgba(34,197,94,.5);
+    }
+    .dot.on {
+      background: var(--up);
+      animation: pulse 1.4s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(34,197,94,.55); }
+      70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+
+    .pattern-panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      padding: 14px 14px 10px;
+      margin-bottom: 14px;
+    }
+    .pattern-panel .head {
+      display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+      margin-bottom: 10px;
+    }
+    .pattern-panel h2 { margin: 0; font-size: .95rem; color: var(--muted); font-weight: 600; }
+    .pattern-meta { font-size: .8rem; color: var(--muted); }
+    .chips {
+      display: flex; flex-wrap: wrap; gap: 5px;
+      align-content: flex-start;
+      min-height: 92px;
+    }
+    .chip {
+      width: 28px; height: 28px; border-radius: 7px;
+      display: grid; place-items: center;
+      font-size: .72rem; font-weight: 800; letter-spacing: .02em;
+      user-select: none;
+    }
+    .chip.up { background: var(--up-soft); color: var(--up); border: 1px solid rgba(34,197,94,.35); }
+    .chip.down { background: var(--down-soft); color: var(--down); border: 1px solid rgba(239,68,68,.35); }
+    .chip:hover { outline: 1px solid #fff3; transform: translateY(-1px); }
+    .pattern-string {
+      margin-top: 10px; font-family: ui-monospace, Consolas, monospace;
+      font-size: .78rem; color: var(--muted); word-break: break-all;
+      line-height: 1.5;
+    }
+    .pattern-string .U { color: var(--up); font-weight: 700; }
+    .pattern-string .D { color: var(--down); font-weight: 700; }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px; margin-bottom: 14px;
+    }
+    .stat {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 12px 14px;
+    }
+    .stat .k { color: var(--muted); font-size: .72rem; }
+    .stat .v { font-size: 1.25rem; font-weight: 750; margin-top: 3px; }
+    .stat .v.up { color: var(--up); }
+    .stat .v.down { color: var(--down); }
+
+    table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+    th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+    .pill {
+      display: inline-block; min-width: 48px; text-align: center;
+      padding: 2px 8px; border-radius: 999px; font-weight: 750; font-size: .72rem;
+    }
+    .pill.up { background: var(--up-soft); color: var(--up); }
+    .pill.down { background: var(--down-soft); color: var(--down); }
+    .pill.wait { background: #1a222c; color: var(--muted); }
+    .pill.hit { background: var(--up-soft); color: var(--up); }
+    .pill.miss { background: var(--down-soft); color: var(--down); }
+    .pill.skip { background: #1a222c; color: var(--muted); }
+    .table-wrap { max-height: 420px; overflow: auto; margin-top: 12px; }
+
+    .predict {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(135deg, #14201a 0%, #1a1520 55%, #141b24 100%);
+      padding: 16px 18px;
+      margin-bottom: 14px;
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 18px;
+      align-items: center;
+    }
+    @media (max-width: 720px) {
+      .predict { grid-template-columns: 1fr; }
+    }
+    .predict-side {
+      text-align: center;
+      padding: 14px 10px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #0f151c;
+    }
+    .predict-side.wait { border-color: #3a4555; }
+    .predict-side.up { border-color: rgba(34,197,94,.45); box-shadow: inset 0 0 24px rgba(34,197,94,.08); }
+    .predict-side.down { border-color: rgba(239,68,68,.45); box-shadow: inset 0 0 24px rgba(239,68,68,.08); }
+    .predict-side .label {
+      font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
+    }
+    .predict-side .call {
+      font-size: 2rem; font-weight: 800; margin: 6px 0 2px; line-height: 1;
+    }
+    .predict-side .call.up { color: var(--up); }
+    .predict-side .call.down { color: var(--down); }
+    .predict-side .call.wait { color: var(--muted); font-size: 1.35rem; }
+    .predict-side .conf { font-size: .85rem; color: var(--muted); }
+    .predict-body h3 { margin: 0 0 8px; font-size: .95rem; font-weight: 650; }
+    .bars { display: grid; gap: 8px; margin: 8px 0 10px; }
+    .bar-row { display: grid; grid-template-columns: 52px 1fr 48px; gap: 8px; align-items: center; font-size: .82rem; }
+    .bar-track { height: 10px; border-radius: 999px; background: #0f151c; overflow: hidden; border: 1px solid var(--line); }
+    .bar-fill { height: 100%; border-radius: 999px; }
+    .bar-fill.up { background: var(--up); }
+    .bar-fill.down { background: var(--down); }
+    .reasons { margin: 0; padding-left: 18px; color: var(--muted); font-size: .82rem; line-height: 1.45; }
+    .predict-meta {
+      margin-top: 8px; font-size: .78rem; color: var(--muted);
+      display: flex; flex-wrap: wrap; gap: 10px 16px;
+    }
+    .predict-meta strong { color: var(--text); font-weight: 650; }
+    .chip.hit { outline: 2px solid rgba(34,197,94,.85); }
+    .chip.miss { outline: 2px solid rgba(239,68,68,.85); opacity: .85; }
+    .chip.skip { outline: 2px dashed #556; opacity: .55; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: .75rem; color: var(--muted); }
+    .legend span b { font-weight: 700; }
+    .legend .hit { color: var(--up); }
+    .legend .miss { color: var(--down); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>BC Up/Down Pattern Analyzer</h1>
+    <p class="sub">Live settled history from BC.Game Up/Down — scan the chip strip to spot streaks and flips at a glance.</p>
+
+    <div class="bar">
+      <label>Symbol
+        <input id="symbol" value="BTC/USD" />
+      </label>
+      <label>Period
+        <input id="label" value="btc_5" />
+      </label>
+      <button id="btnStart">Start live collector</button>
+      <button id="btnStop" class="stop">Stop</button>
+      <button id="btnRefresh" class="ghost">Refresh</button>
+      <button id="btnExportRounds" class="ghost">Export rounds CSV</button>
+      <button id="btnExportPred" class="ghost">Export predictions CSV</button>
+      <div class="live"><span class="dot" id="dot"></span><span id="status">Loading…</span></div>
+    </div>
+
+    <section class="pattern-panel">
+      <div class="head">
+        <h2>History pattern (oldest → newest)</h2>
+        <div class="pattern-meta" id="patternMeta">—</div>
+      </div>
+      <div class="chips" id="chips"></div>
+      <div class="pattern-string" id="patternString"></div>
+    </section>
+
+    <section class="pattern-panel">
+      <div class="head">
+        <h2>Prediction correctness (walk-forward)</h2>
+        <div class="pattern-meta" id="reviewMeta">—</div>
+      </div>
+      <div class="chips" id="reviewChips"></div>
+      <div class="legend">
+        <span>Letter = <b>actual</b> result</span>
+        <span class="hit">Green outline = HIT (model matched)</span>
+        <span class="miss">Red outline = MISS</span>
+        <span>Dashed = SKIP / NO TRADE</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Actual</th>
+              <th>Predicted</th>
+              <th>Outcome</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Move</th>
+            </tr>
+          </thead>
+          <tbody id="reviewBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="predict" id="predict">
+      <div class="predict-side wait" id="predictSide">
+        <div class="label">Next round</div>
+        <div class="call wait" id="predictCall">—</div>
+        <div class="conf" id="predictConf">confidence —</div>
+      </div>
+      <div class="predict-body">
+        <h3 id="predictTitle">Next-round pattern lean</h3>
+        <div class="bars">
+          <div class="bar-row">
+            <span class="up">UP</span>
+            <div class="bar-track"><div class="bar-fill up" id="barUp" style="width:50%"></div></div>
+            <span id="pctUp">50%</span>
+          </div>
+          <div class="bar-row">
+            <span class="down">DOWN</span>
+            <div class="bar-track"><div class="bar-fill down" id="barDown" style="width:50%"></div></div>
+            <span id="pctDown">50%</span>
+          </div>
+        </div>
+        <ul class="reasons" id="predictReasons"></ul>
+        <div class="predict-meta" id="predictMeta"></div>
+      </div>
+    </section>
+
+    <section class="stats" id="stats"></section>
+  </div>
+
+  <script>
+    let refreshTimer = null;
+
+    const $ = (id) => document.getElementById(id);
+
+    function fmtPrice(v) {
+      if (v == null || v === 0) return "—";
+      const n = Number(v);
+      return n >= 100 ? n.toFixed(2) : n.toPrecision(5);
+    }
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    function renderChips(a) {
+      const chips = a.recent_chips || a.chips || [];
+      $("chips").innerHTML = chips.map(c => {
+        const cls = (c.result || "").toLowerCase();
+        const letter = c.result === "UP" ? "U" : "D";
+        const tip = `${c.result} | start ${fmtPrice(c.start_price)} → end ${fmtPrice(c.end_price)}`;
+        return `<div class="chip ${cls}" title="${tip}">${letter}</div>`;
+      }).join("");
+
+      const pat = a.pattern || "";
+      $("patternString").innerHTML = pat
+        .split("")
+        .map(ch => `<span class="${ch}">${ch}</span>`)
+        .join("");
+      $("patternMeta").textContent = `${chips.length} shown · ${a.total_settled} settled total · streak ${a.current_streak || 0} ${a.current_streak_side || ""}`;
+    }
+
+    function renderReview(a) {
+      const rev = a.prediction_review || {};
+      const chips = rev.chips || [];
+      $("reviewChips").innerHTML = chips.map(c => {
+        const actual = (c.actual || "").toLowerCase();
+        const letter = c.actual === "UP" ? "U" : "D";
+        const oc = (c.outcome || "SKIP").toLowerCase();
+        const tip = `n=${c.n} actual=${c.actual} predicted=${c.predicted || "NO TRADE"} → ${c.outcome}`;
+        return `<div class="chip ${actual} ${oc}" title="${tip}">${letter}</div>`;
+      }).join("");
+      const rate = rev.hit_rate == null ? "—" : `${(rev.hit_rate * 100).toFixed(1)}%`;
+      $("reviewMeta").textContent =
+        `${chips.length} scored · hit ${rev.hits || 0} · miss ${rev.misses || 0} · skip ${rev.skips || 0} · hit rate ${rate}`;
+
+      const rows = [...(rev.rows || [])].reverse();
+      $("reviewBody").innerHTML = rows.map(r => {
+        const actualCls = (r.actual || "").toLowerCase();
+        const pred = r.predicted || "NO TRADE";
+        const predCls = r.predicted ? r.predicted.toLowerCase() : "wait";
+        const out = (r.outcome || "SKIP").toLowerCase();
+        const move = r.move == null ? "—" : Number(r.move).toFixed(2);
+        return `<tr>
+          <td>${r.n}</td>
+          <td><span class="pill ${actualCls}">${r.actual || "—"}</span></td>
+          <td><span class="pill ${predCls}">${pred}</span></td>
+          <td><span class="pill ${out}">${r.outcome || "SKIP"}</span></td>
+          <td>${fmtPrice(r.start_price)}</td>
+          <td>${fmtPrice(r.end_price)}</td>
+          <td>${move}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderStats(a) {
+      const t = a.transitions || {};
+      const cards = [
+        { k: "Settled", v: a.total_settled },
+        { k: "UP", v: `${a.up_count} (${((a.up_ratio||0)*100).toFixed(1)}%)`, cls: "up" },
+        { k: "DOWN", v: `${a.down_count} (${((a.down_ratio||0)*100).toFixed(1)}%)`, cls: "down" },
+        { k: "Current streak", v: a.current_streak ? `${a.current_streak} ${a.current_streak_side}` : "—" },
+        { k: "Longest streak", v: a.longest_streak ? `${a.longest_streak} ${a.longest_streak_side}` : "—" },
+        { k: "After UP → UP", v: t.UU ?? 0 },
+        { k: "After UP → DOWN", v: t.UD ?? 0 },
+        { k: "After DOWN → UP", v: t.DU ?? 0 },
+        { k: "After DOWN → DOWN", v: t.DD ?? 0 },
+      ];
+      $("stats").innerHTML = cards.map(c => `
+        <div class="stat"><div class="k">${c.k}</div><div class="v ${c.cls||""}">${c.v}</div></div>
+      `).join("");
+    }
+
+    function renderPrediction(a) {
+      const p = a.prediction || {};
+      const side = p.side;
+      const box = $("predictSide");
+      const call = $("predictCall");
+      box.className = "predict-side " + (side === "UP" ? "up" : side === "DOWN" ? "down" : "wait");
+      if (!side) {
+        call.className = "call wait";
+        call.textContent = p.label || "WAIT";
+      } else {
+        call.className = "call " + side.toLowerCase();
+        call.textContent = side;
+      }
+      $("predictConf").textContent = `confidence ${((p.confidence || 0) * 100).toFixed(0)}% · ${p.label || "—"}`;
+      $("predictTitle").textContent = side
+        ? `Next-round lean: ${side} (after ${p.based_on_last || "—"})`
+        : "Next-round lean: no clear edge";
+
+      const pu = Math.round((p.p_up ?? 0.5) * 100);
+      const pd = Math.round((p.p_down ?? 0.5) * 100);
+      $("barUp").style.width = pu + "%";
+      $("barDown").style.width = pd + "%";
+      $("pctUp").textContent = pu + "%";
+      $("pctDown").textContent = pd + "%";
+
+      $("predictReasons").innerHTML = (p.reasons || []).map(r => `<li>${r}</li>`).join("");
+      const hit = p.model_hit_rate == null ? "—" : `${(p.model_hit_rate * 100).toFixed(1)}% (${p.model_trials} trials)`;
+      $("predictMeta").innerHTML = `
+        <span>Walk-forward hit rate: <strong>${hit}</strong></span>
+        <span>Transition samples: <strong>${p.transition_samples ?? 0}</strong></span>
+        <span>${p.disclaimer || "Pattern heuristic only."}</span>
+      `;
+    }
+
+    async function refresh() {
+      const symbol = $("symbol").value.trim() || "BTC/USD";
+      const [analytics, status] = await Promise.all([
+        api(`/api/analytics?symbol=${encodeURIComponent(symbol)}&limit=300`),
+        api("/api/scrape/status"),
+      ]);
+      renderChips(analytics);
+      renderReview(analytics);
+      renderPrediction(analytics);
+      renderStats(analytics);
+
+      $("dot").classList.toggle("on", !!status.running);
+      $("btnStart").disabled = !!status.running;
+      $("btnStart").textContent = status.running ? "Collector running…" : "Start live collector";
+      if status.running) {
+        const last = (status.events || []).slice(-1)[0];
+        if (last?.type === "waiting_for_user") {
+          $("status").textContent = `Waiting for you in Chromium… (${last.buttons ?? 0} chips) — login / open Up-Down`;
+        } else if (status.last_error && String(status.last_error).toLowerCase().includes("frequent")) {
+          $("status").textContent = `Rate limited — waiting/retrying… (${status.rounds} settled)`;
+        } else {
+          $("status").textContent = last?.db_rounds != null
+            ? `Live · ${status.rounds} settled · last game ${last.game_id || "—"}`
+            : `Live collecting · ${status.rounds} settled · mode ${status.request?.mode || "html"}`;
+        }
+      } else if (status.last_error) {
+        $("status").textContent = `Stopped · ${status.last_error}`;
+      } else {
+        $("status").textContent = `${analytics.total_settled} settled in SQLite — click Start if needed`;
+      }
+    }
+
+    function exportCsv(kind) {
+      const symbol = $("symbol").value.trim() || "BTC/USD";
+      const path = kind === "predictions"
+        ? `/api/export/predictions.csv?symbol=${encodeURIComponent(symbol)}&limit=5000`
+        : `/api/export/rounds.csv?symbol=${encodeURIComponent(symbol)}&limit=5000`;
+      window.location.href = path;
+    }
+
+    $("btnRefresh").onclick = () => refresh().catch(e => $("status").textContent = e.message);
+    $("btnExportRounds").onclick = () => exportCsv("rounds");
+    $("btnExportPred").onclick = () => exportCsv("predictions");
+    $("btnStart").onclick = async () => {
+      try {
+        const st = await api("/api/scrape/status");
+        if (st.running) {
+          $("status").textContent = "Collector is already running (green Live dot). No need to start again.";
+          await refresh();
+          return;
+        }
+        const res = await api("/api/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol: $("symbol").value.trim() || "BTC/USD",
+            label: $("label").value.trim() || "btc_5",
+            duration_sec: 0,
+            mode: "html",
+          }),
+        });
+        $("status").textContent = res.message || "HTML collector started…";
+        await refresh();
+      } catch (e) {
+        $("status").textContent = e.message;
+      }
+    };
+    $("btnStop").onclick = async () => {
+      await api("/api/scrape/stop", { method: "POST" });
+      $("status").textContent = "Stop requested…";
+    };
+
+    refresh().catch(e => $("status").textContent = e.message);
+    refreshTimer = setInterval(() => refresh().catch(console.error), 27000);
+  </script>
+</body>
+</html>
