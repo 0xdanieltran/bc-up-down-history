@@ -526,8 +526,10 @@ class Database:
                     up_pool_amount=COALESCE(excluded.up_pool_amount, rounds.up_pool_amount),
                     down_pool_amount=COALESCE(excluded.down_pool_amount, rounds.down_pool_amount),
                     raw_json=excluded.raw_json,
-                    scraped_at=excluded.scraped_at,
-                    collected_from=excluded.collected_from
+                    -- Keep first-seen scraped_at so rounds without price_* times
+                    -- do not reshuffle when re-upserted (history/prediction order).
+                    scraped_at=rounds.scraped_at,
+                    collected_from=COALESCE(rounds.collected_from, excluded.collected_from)
                 """,
                 (
                     rid,
@@ -932,7 +934,9 @@ class Database:
                 f"""
                 SELECT * FROM rounds
                 {where}
-                ORDER BY COALESCE(price_end_time, scraped_at) DESC, scraped_at DESC, rowid DESC
+                ORDER BY COALESCE(price_end_time, price_start_time, scraped_at) DESC,
+                         CASE WHEN id GLOB '[0-9]*' THEN CAST(id AS INTEGER) ELSE 0 END DESC,
+                         scraped_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 params,
@@ -954,7 +958,9 @@ class Database:
                        price_start_time, price_end_time, scraped_at, period_sec, label
                 FROM rounds
                 {where}
-                ORDER BY COALESCE(price_end_time, scraped_at) DESC, scraped_at DESC, rowid DESC
+                ORDER BY COALESCE(price_end_time, price_start_time, scraped_at) DESC,
+                         CASE WHEN id GLOB '[0-9]*' THEN CAST(id AS INTEGER) ELSE 0 END DESC,
+                         scraped_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 params,
@@ -969,9 +975,50 @@ class Database:
         return items
 
     def analytics_summary(self, symbol: str | None = None, limit: int = 500) -> dict[str, Any]:
-        seq = self.settled_sequence(symbol=symbol, limit=limit)
+        # Walk-forward on a long buffer so past HIT/MISS for a round_id stay fixed
+        # when the display window slides; only brand-new rounds get new labels.
+        db_settled = self.count_rounds(symbol=symbol, settled_only=True)
+        fetch_limit = max(int(limit), min(int(db_settled or 0) + PRED_LOOKBACK, 100_000))
+        full_seq = self.settled_sequence(symbol=symbol, limit=fetch_limit)
+        full_results = [r["result"] for r in full_seq if r.get("result")]
+        prediction = _predict_from_history(full_results)
+        review_full = _prediction_review(full_results, full_seq)
+
+        seq = full_seq[-limit:] if len(full_seq) > limit else full_seq
+        # Display-local indices (1..len) while review used full priors above.
+        for i, item in enumerate(seq):
+            item["n"] = i + 1
         results = [r["result"] for r in seq if r.get("result")]
         total = len(results)
+        # Keep review rows aligned to the display window, but computed from full priors.
+        if len(full_seq) > limit:
+            review_rows = (review_full.get("rows") or [])[-limit:]
+            review_chips = (review_full.get("chips") or [])[-limit:]
+            # Re-index display n within the window for the UI strip.
+            for i, row in enumerate(review_rows):
+                row["n"] = i + 1
+            for i, chip in enumerate(review_chips):
+                chip["n"] = i + 1
+            review = {
+                **review_full,
+                "rows": review_rows,
+                "chips": review_chips,
+            }
+            # Window-local tallies for the visible strip.
+            hits = sum(1 for r in review_rows if r.get("outcome") == "HIT")
+            misses = sum(1 for r in review_rows if r.get("outcome") == "MISS")
+            skips = sum(1 for r in review_rows if r.get("outcome") == "SKIP")
+            waits = sum(1 for r in review_rows if r.get("outcome") == "WAIT")
+            trials = hits + misses
+            review["hits"] = hits
+            review["misses"] = misses
+            review["skips"] = skips
+            review["waits"] = waits
+            review["trials"] = trials
+            review["bets"] = trials
+            review["hit_rate"] = round(hits / trials, 4) if trials else None
+        else:
+            review = review_full
         ups = sum(1 for r in results if r == "UP")
         downs = sum(1 for r in results if r == "DOWN")
 
@@ -1068,10 +1115,6 @@ class Database:
             }
             for r in seq
         ]
-
-        prediction = _predict_from_history(results)
-        review = _prediction_review(results, seq)
-        db_settled = self.count_rounds(symbol=symbol, settled_only=True)
 
         return {
             "total_settled": db_settled,

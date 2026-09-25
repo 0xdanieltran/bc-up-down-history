@@ -315,7 +315,7 @@
       </div>
       <div class="bar" style="margin:0;padding:0;border:0;background:transparent">
         <label>Deposit ($)
-          <input id="simDeposit" type="number" min="1" step="1" value="20" />
+          <input id="simDeposit" type="number" min="1" step="1" value="100" />
         </label>
         <label>Stake / bet ($)
           <input id="simStake" type="number" min="0.01" step="0.5" value="1" />
@@ -680,6 +680,7 @@
     }
 
     let simTimer = null;
+    let simStartedAt = null;
     const SIM_TICK_MS = 2000;
 
     function setSimControls(running) {
@@ -701,9 +702,34 @@
     }
 
     function renderSimState(res) {
-      if (!res || (res.running === false && res.balance == null && !(res.equity || []).length)) {
+      if (!res) return;
+      // Ignore stale tick/status from a previous session after Start.
+      if (
+        simStartedAt != null
+        && res.started_at != null
+        && Number(res.started_at) < Number(simStartedAt)
+      ) {
         return;
       }
+      // After server restart, tick/status may be {running:false} with no balance —
+      // always unlock controls so Start is not stuck disabled.
+      if (res.running === false && res.balance == null && !(res.equity || []).length) {
+        ensureSimTimer(false);
+        setSimControls(false);
+        simStartedAt = null;
+        $("simMeta").textContent = "LIVE bets use prediction side’s return % (e.g. 196%) until you stop";
+        $("simSummary").textContent = "Idle — click Start live sim (session resets if the API server restarts).";
+        return;
+      }
+      if (res.started_at != null) simStartedAt = res.started_at;
+      // Keep inputs aligned with the active session deposit/stake.
+      if (res.deposit != null && !res.running) {
+        $("simDeposit").value = String(res.deposit);
+      } else if (res.deposit != null && res.running) {
+        $("simDeposit").value = String(res.deposit);
+      }
+      if (res.stake != null) $("simStake").value = String(res.stake);
+
       const running = !!res.running;
       ensureSimTimer(running && !res.busted);
       const bust = res.busted
@@ -724,16 +750,17 @@
         <span>${res.message || ""}</span>
       `;
       const eq = res.equity || [];
-      const deposit = Number(res.deposit || 20);
+      const deposit = Number(res.deposit || 0) || 100;
       const bals = eq.map(e => e.balance);
-      const maxB = Math.max(deposit, ...bals, 1);
+      const maxB = Math.max(deposit, ...(bals.length ? bals : [deposit]), 1);
       $("simEquity").innerHTML = eq.slice(-200).map(e => {
         const h = Math.max(2, Math.round((e.balance / maxB) * 52));
         const cls = e.outcome === "LOSS" ? "loss" : "";
         return `<i class="${cls}" style="height:${h}px" title="#${e.n} ${e.bet}→${e.result} ${e.outcome} $${e.balance}"></i>`;
       }).join("");
       const rows = [...eq].reverse().slice(0, 80);
-      $("simBody").innerHTML = rows.map(r => `
+      $("simBody").innerHTML = rows.length
+        ? rows.map(r => `
         <tr>
           <td>${r.n}</td>
           <td><span class="pill ${(r.bet || "").toLowerCase()}">${r.bet || "—"}</span></td>
@@ -744,7 +771,8 @@
           <td><span class="pill ${r.outcome === "WIN" ? "hit" : r.outcome === "LOSS" ? "miss" : "wait"}">${r.outcome}</span></td>
           <td>$${Number(r.balance).toFixed(2)}</td>
         </tr>
-      `).join("");
+      `).join("")
+        : `<tr><td colspan="8">${running ? "No bets yet — waiting for next playable settled round…" : "No bets recorded."}</td></tr>`;
       if (res.busted || !running) {
         ensureSimTimer(false);
         setSimControls(false);
@@ -767,27 +795,41 @@
 
     async function startLiveSim() {
       const symbol = $("symbol").value.trim() || "BTC/USD";
+      const deposit = parseFloat($("simDeposit").value);
+      const stake = parseFloat($("simStake").value);
+      if (!Number.isFinite(deposit) || deposit <= 0) {
+        $("simSummary").textContent = "Enter a valid deposit amount.";
+        return;
+      }
+      if (!Number.isFinite(stake) || stake <= 0) {
+        $("simSummary").textContent = "Enter a valid stake amount.";
+        return;
+      }
       try {
+        // Stop ticks first so an in-flight refresh cannot paint an old $20 session.
+        if (simTimer) { clearInterval(simTimer); simTimer = null; }
         const res = await api("/api/simulate/live/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             symbol,
-            deposit: Number($("simDeposit").value || 20),
-            stake: Number($("simStake").value || 1),
+            deposit,
+            stake,
             fee_rate: 0,
             limit: 5000,
           }),
         });
+        simStartedAt = res.started_at ?? Date.now();
+        if (Number(res.balance) !== Number(deposit)) {
+          $("simSummary").textContent =
+            `Started but balance $${res.balance} != deposit $${deposit}. Try Stop then Start again.`;
+        }
         renderSimState(res);
-        if (simTimer) clearInterval(simTimer);
         simTimer = setInterval(() => { simTick().catch(() => {}); }, SIM_TICK_MS);
-        simTick().catch(() => {});
       } catch (e) {
         $("simSummary").textContent = e.message || String(e);
       }
     }
-
     async function stopLiveSim() {
       try {
         const res = await api("/api/simulate/live/stop", { method: "POST" });

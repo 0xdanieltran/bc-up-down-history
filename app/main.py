@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 import logging
 import os
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -26,12 +28,20 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "updown_history.db"
 STATIC_DIR = ROOT / "static"
+SIM_STATE_PATH = DATA_DIR / "live_sim.json"
 SCRAPE_MODE = os.getenv("SCRAPE_MODE", "html").strip().lower()  # html | api
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("updown")
 
 app = FastAPI(title="BC Up/Down History", version="1.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 db = Database(DB_PATH)
 
 _scrape_lock = asyncio.Lock()
@@ -48,6 +58,39 @@ _scrape_state: dict[str, Any] = {
 
 _sim_lock = threading.Lock()
 _sim_session: dict[str, Any] | None = None
+
+
+def _sim_to_disk(session: dict[str, Any] | None) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not session:
+        if SIM_STATE_PATH.exists():
+            try:
+                SIM_STATE_PATH.unlink()
+            except OSError:
+                pass
+        return
+    payload = dict(session)
+    payload["seen_ids"] = sorted(str(x) for x in session.get("seen_ids") or [])
+    try:
+        SIM_STATE_PATH.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not persist live sim: %s", exc)
+
+
+def _sim_from_disk() -> dict[str, Any] | None:
+    if not SIM_STATE_PATH.is_file():
+        return None
+    try:
+        raw = json.loads(SIM_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not load live sim: %s", exc)
+        return None
+    if not isinstance(raw, dict):
+        return None
+    seen = raw.get("seen_ids") or []
+    raw["seen_ids"] = set(str(x) for x in seen)
+    raw["equity"] = list(raw.get("equity") or [])
+    return raw
 
 
 def _playable_prediction_rows(symbol: str, limit: int = 5000) -> list[dict[str, Any]]:
@@ -128,6 +171,7 @@ class ScrapeRequest(BaseModel):
 
 @app.on_event("startup")
 async def _startup() -> None:
+    global _sim_session
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     purged = db.purge_unsettled()
     logger.info(
@@ -136,6 +180,16 @@ async def _startup() -> None:
         db.count_rounds(settled_only=True),
         purged,
     )
+    restored = _sim_from_disk()
+    if restored:
+        with _sim_lock:
+            _sim_session = restored
+        logger.info(
+            "Restored live sim (running=%s balance=%s bets=%s)",
+            restored.get("running"),
+            restored.get("balance"),
+            len(restored.get("equity") or []),
+        )
     # Auto-start continuous collector for BTC/USD btc_5
     asyncio.create_task(_autostart_collector())
 
@@ -522,7 +576,7 @@ def list_odds(
 
 class SimulateRequest(BaseModel):
     symbol: str = "BTC/USD"
-    deposit: float = Field(default=20.0, gt=0, le=1_000_000)
+    deposit: float = Field(default=100.0, gt=0, le=1_000_000)
     stake: float = Field(default=1.0, gt=0, le=1_000_000)
     fee_rate: float = Field(
         default=0.0,
@@ -578,6 +632,7 @@ def simulate_live_start(body: SimulateRequest) -> dict[str, Any]:
             "limit": body.limit,
         }
         pub = _sim_public(_sim_session)
+    _sim_to_disk(_sim_session)
     pub["ok"] = True
     pub["message"] = (
         f"Live sim started at ${body.deposit:.2f}. "
@@ -593,6 +648,7 @@ def simulate_live_stop() -> dict[str, Any]:
         if _sim_session:
             _sim_session["running"] = False
         pub = _sim_public(_sim_session)
+        _sim_to_disk(_sim_session)
     pub["ok"] = True
     pub["message"] = "Live sim stopped"
     return pub
@@ -616,21 +672,29 @@ def simulate_live_tick() -> dict[str, Any]:
             return pub
 
         session = _sim_session
+        started_at = session["started_at"]
         symbol = session["symbol"]
         stake = float(session["stake"])
         fee_default = float(session["fee_rate"])
-        seen: set[str] = session["seen_ids"]
+        seen_snapshot = set(session["seen_ids"])
         limit = int(session.get("limit") or 5000)
 
     playable = _playable_prediction_rows(symbol, limit)
-    newcomers = [r for r in playable if str(r["round_id"]) not in seen]
+    newcomers = [r for r in playable if str(r["round_id"]) not in seen_snapshot]
     new_bets: list[dict[str, Any]] = []
 
     with _sim_lock:
-        if not _sim_session or not _sim_session["running"]:
+        # Abort if Start replaced this session while we computed playable rows.
+        if (
+            not _sim_session
+            or not _sim_session["running"]
+            or _sim_session.get("started_at") != started_at
+        ):
             pub = _sim_public(_sim_session)
             pub["ok"] = True
             pub["new_bets"] = []
+            if _sim_session and _sim_session.get("started_at") != started_at:
+                pub["message"] = "Session replaced — ignored stale tick"
             return pub
         session = _sim_session
         for row in newcomers:
@@ -673,6 +737,7 @@ def simulate_live_tick() -> dict[str, Any]:
                 session["running"] = False
                 break
         pub = _sim_public(session)
+        _sim_to_disk(session)
     pub["ok"] = True
     pub["new_bets"] = new_bets
     if new_bets:

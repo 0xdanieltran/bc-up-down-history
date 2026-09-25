@@ -27,6 +27,11 @@ PROFILE_DIR = Path(
         str(Path(__file__).resolve().parent.parent / "data" / "browser_profile"),
     )
 )
+# Unpacked Chrome extension (sibling bc-up-down-extension by default).
+# Set HTML_EXTENSION_DIR= to disable. Extensions require headed Chromium.
+_DEFAULT_EXT = Path(__file__).resolve().parent.parent.parent / "bc-up-down-extension"
+_EXT_ENV = os.getenv("HTML_EXTENSION_DIR", str(_DEFAULT_EXT)).strip()
+EXTENSION_DIR = Path(_EXT_ENV) if _EXT_ENV else None
 USER_WAIT_SEC = int(os.getenv("HTML_USER_WAIT_SEC", "600"))
 # Lock when center countdown shows 2 or 3 seconds remaining.
 ODDS_LOCK_MIN_SEC = float(os.getenv("ODDS_LOCK_MIN_SEC", "2"))
@@ -37,6 +42,22 @@ _DOM_ODDS_JS = DOM_ODDS_JS
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 _PRICE_RE = re.compile(r"[\d]+(?:\.\d+)?")
+
+
+def _extension_load_args() -> list[str]:
+    """Args so Playwright Chromium loads an unpacked MV3 extension."""
+    if EXTENSION_DIR is None:
+        return []
+    ext = EXTENSION_DIR.resolve()
+    if not (ext / "manifest.json").is_file():
+        logger.warning("HTML_EXTENSION_DIR set but no manifest.json at %s", ext)
+        return []
+    # Absolute path; Playwright Chromium ignores Load unpacked UI.
+    path = str(ext)
+    return [
+        f"--disable-extensions-except={path}",
+        f"--load-extension={path}",
+    ]
 
 
 def _in_odds_lock_window(countdown: float | None) -> bool:
@@ -529,11 +550,21 @@ async def scrape_html_history(
         return _fingerprint(side, start, end), start, end
 
     async with async_playwright() as p:
+        ext_args = _extension_load_args()
+        # Extensions only work in headed Chromium.
+        if ext_args and use_headless:
+            logger.warning("Extension load requested — forcing headed mode (not headless)")
+            use_headless = False
+        launch_args = ["--disable-blink-features=AutomationControlled", *ext_args]
+        if ext_args:
+            logger.info("Loading unpacked extension from %s", EXTENSION_DIR)
+            if on_event:
+                on_event({"type": "extension", "path": str(EXTENSION_DIR.resolve())})
         context = await p.chromium.launch_persistent_context(
             user_data_dir=str(PROFILE_DIR),
             headless=use_headless,
             viewport={"width": 1400, "height": 900},
-            args=["--disable-blink-features=AutomationControlled"],
+            args=launch_args,
         )
         page = context.pages[0] if context.pages else await context.new_page()
 
