@@ -5,6 +5,7 @@ import json
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,11 @@ STATUS_MAP = {
     1007: "CANCEL",
     1008: "SETTLING",
 }
+
+# Pattern model: require this many prior settled rounds; score on that lookback window.
+PRED_MIN_HISTORY = 100
+PRED_LOOKBACK = 100
+PRED_RECENT_WINDOW = 50
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS rounds (
@@ -66,6 +72,24 @@ CREATE TABLE IF NOT EXISTS ticks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ticks_symbol_t ON ticks(symbol, t DESC);
+
+-- Locked UP/DOWN return % captured near center timer ~2–3s.
+CREATE TABLE IF NOT EXISTS pool_snapshots (
+    round_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    label TEXT,
+    up_pct REAL,
+    down_pct REAL,
+    up_pool REAL,
+    down_pool REAL,
+    countdown_sec REAL,
+    locked INTEGER NOT NULL DEFAULT 0,
+    source TEXT,
+    captured_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pool_snapshots_symbol_captured
+    ON pool_snapshots(symbol, captured_at DESC);
 """
 
 
@@ -113,28 +137,74 @@ def _transition_probs(results: list[str]) -> dict[str, dict[str, float | int]]:
     return out
 
 
+def _pattern_window(results: list[str]) -> list[str]:
+    """Last N settled results used for pattern stats (at least PRED_LOOKBACK when available)."""
+    if len(results) <= PRED_LOOKBACK:
+        return list(results)
+    return results[-PRED_LOOKBACK:]
+
+
+def _ts_ms(raw: Any) -> int | None:
+    """Normalize epoch seconds/ms to milliseconds."""
+    if raw is None:
+        return None
+    try:
+        t = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if t <= 0:
+        return None
+    if t < 1_000_000_000_000:  # seconds → ms
+        t *= 1000
+    return t
+
+
+def _local_day(ts_ms: int | None) -> str | None:
+    if ts_ms is None:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d")
+
+
 def _prediction_review(results: list[str], seq: list[dict[str, Any]]) -> dict[str, Any]:
-    """Walk-forward review: predicted vs actual for each round after warmup."""
+    """Walk-forward review: WAIT until 100 priors, then predict from prior lookback window."""
     rows: list[dict[str, Any]] = []
     hits = 0
     misses = 0
     skips = 0
-    for i in range(5, len(results)):
-        hist = results[:i]
-        pred = _predict_from_history_simple(hist)
-        actual = results[i]
+    waits = 0
+    by_day: dict[str, dict[str, Any]] = {}
+    for i, actual in enumerate(results):
         item = seq[i] if i < len(seq) else {}
-        if pred is None:
-            outcome = "SKIP"
-            skips += 1
+        ts = _ts_ms(item.get("price_end_time") or item.get("scraped_at"))
+        day = _local_day(ts)
+        if i < PRED_MIN_HISTORY:
+            outcome = "WAIT"
+            pred = None
             hit = None
+            waits += 1
         else:
-            hit = pred == actual
-            outcome = "HIT" if hit else "MISS"
-            if hit:
-                hits += 1
+            hist = _pattern_window(results[:i])
+            pred = _predict_from_history_simple(hist)
+            if pred is None:
+                outcome = "SKIP"
+                skips += 1
+                hit = None
             else:
-                misses += 1
+                hit = pred == actual
+                outcome = "HIT" if hit else "MISS"
+                if hit:
+                    hits += 1
+                else:
+                    misses += 1
+                if day:
+                    bucket = by_day.setdefault(
+                        day, {"date": day, "bets": 0, "hits": 0, "misses": 0}
+                    )
+                    bucket["bets"] += 1
+                    if hit:
+                        bucket["hits"] += 1
+                    else:
+                        bucket["misses"] += 1
         rows.append(
             {
                 "n": i + 1,
@@ -143,12 +213,23 @@ def _prediction_review(results: list[str], seq: list[dict[str, Any]]) -> dict[st
                 "predicted": pred,
                 "outcome": outcome,
                 "hit": hit,
+                "ts": ts,
+                "day": day,
                 "start_price": item.get("start_price"),
                 "end_price": item.get("end_price"),
                 "move": item.get("move"),
             }
         )
     trials = hits + misses
+    for bucket in by_day.values():
+        b = bucket["bets"]
+        bucket["hit_rate"] = round(bucket["hits"] / b, 4) if b else None
+    today_key = datetime.now().strftime("%Y-%m-%d")
+    today = by_day.get(
+        today_key,
+        {"date": today_key, "bets": 0, "hits": 0, "misses": 0, "hit_rate": None},
+    )
+    by_day_list = [by_day[k] for k in sorted(by_day.keys(), reverse=True)]
     return {
         "rows": rows,
         "chips": [
@@ -163,37 +244,51 @@ def _prediction_review(results: list[str], seq: list[dict[str, Any]]) -> dict[st
         "hits": hits,
         "misses": misses,
         "skips": skips,
+        "waits": waits,
         "trials": trials,
+        "bets": trials,
         "hit_rate": round(hits / trials, 4) if trials else None,
+        "today": today,
+        "by_day": by_day_list,
+        "min_history": PRED_MIN_HISTORY,
+        "lookback": PRED_LOOKBACK,
     }
 
 
 def _predict_from_history(results: list[str]) -> dict[str, Any]:
     """
     Pattern-based next-round prediction (not a guaranteed edge).
+    Uses the last PRED_LOOKBACK (≥100) settled UP/DOWN results.
     Blends: Markov transition | overall base rate | recent window | mild streak fade.
     """
-    if len(results) < 5:
+    if len(results) < PRED_MIN_HISTORY:
         return {
             "side": None,
             "confidence": 0.0,
             "p_up": 0.5,
             "p_down": 0.5,
             "label": "WAIT",
-            "reasons": ["Need at least 5 settled rounds before predicting."],
+            "reasons": [
+                f"Need at least {PRED_MIN_HISTORY} settled rounds before predicting "
+                f"(have {len(results)})."
+            ],
             "based_on_last": None,
             "model_hit_rate": None,
             "model_trials": 0,
+            "history_used": len(results),
+            "lookback": PRED_LOOKBACK,
+            "min_history": PRED_MIN_HISTORY,
         }
 
-    last = results[-1]
-    trans = _transition_probs(results)
-    base_up = sum(1 for r in results if r == "UP") / len(results)
-    recent = results[-20:]
+    window = _pattern_window(results)
+    last = window[-1]
+    trans = _transition_probs(window)
+    base_up = sum(1 for r in window if r == "UP") / len(window)
+    recent = window[-PRED_RECENT_WINDOW:]
     recent_up = sum(1 for r in recent if r == "UP") / len(recent)
 
     streak = 1
-    for val in reversed(results[:-1]):
+    for val in reversed(window[:-1]):
         if val == last:
             streak += 1
         else:
@@ -235,18 +330,19 @@ def _predict_from_history(results: list[str]) -> dict[str, Any]:
         side_out = side
 
     reasons = [
+        f"Using last {len(window)} settled rounds (min {PRED_MIN_HISTORY}).",
         f"Last result was {last} (streak {streak}).",
         f"After {last}: P(UP)={float(trans[last]['UP']):.0%} from {samples} transitions.",
-        f"Overall UP rate {base_up:.0%}; last {len(recent)} rounds UP {recent_up:.0%}.",
+        f"Window UP rate {base_up:.0%}; last {len(recent)} rounds UP {recent_up:.0%}.",
     ]
     if streak >= 3:
         reasons.append(f"Streak fade nudge applied (~{streak_nudge:.0%}) toward a flip.")
 
-    # Walk-forward hit rate of the same blended rule
+    # Walk-forward hit rate on the same lookback rule
     hits = 0
     trials = 0
-    for i in range(5, len(results)):
-        hist = results[:i]
+    for i in range(PRED_MIN_HISTORY, len(results)):
+        hist = _pattern_window(results[:i])
         pred = _predict_from_history_simple(hist)
         if pred is None:
             continue
@@ -267,23 +363,27 @@ def _predict_from_history(results: list[str]) -> dict[str, Any]:
         "reasons": reasons,
         "model_hit_rate": round(hits / trials, 4) if trials else None,
         "model_trials": trials,
+        "history_used": len(window),
+        "lookback": PRED_LOOKBACK,
+        "min_history": PRED_MIN_HISTORY,
         "disclaimer": "Pattern heuristic only - not financial advice; no guaranteed edge.",
     }
 
 
 def _predict_from_history_simple(results: list[str]) -> str | None:
     """Lightweight predictor for walk-forward scoring (no nested backtest)."""
-    if len(results) < 5:
+    if len(results) < PRED_MIN_HISTORY:
         return None
-    last = results[-1]
-    trans = _transition_probs(results)
-    base_up = sum(1 for r in results if r == "UP") / len(results)
-    recent = results[-20:]
+    window = _pattern_window(results)
+    last = window[-1]
+    trans = _transition_probs(window)
+    base_up = sum(1 for r in window if r == "UP") / len(window)
+    recent = window[-PRED_RECENT_WINDOW:]
     recent_up = sum(1 for r in recent if r == "UP") / len(recent)
     samples = int(trans[last]["samples"])
     markov_up = float(trans[last]["UP"])
     streak = 1
-    for val in reversed(results[:-1]):
+    for val in reversed(window[:-1]):
         if val == last:
             streak += 1
         else:
@@ -476,6 +576,197 @@ class Database:
                 inserted += 1
         return inserted
 
+    def upsert_pool_snapshot(
+        self,
+        *,
+        round_id: str,
+        symbol: str,
+        label: str | None,
+        up_pct: float | None,
+        down_pct: float | None,
+        up_pool: float | None = None,
+        down_pool: float | None = None,
+        countdown_sec: float | None = None,
+        lock: bool = False,
+        source: str = "dom",
+    ) -> dict[str, Any]:
+        """
+        Store / refresh UP/DOWN Wins % for a live round.
+        `up_pct`/`down_pct` are BC display return % (e.g. 196 = 196%).
+        Once locked (center timer 2–3s), later writes are ignored except a
+        one-time DOM lock replacing a non-DOM lock.
+        """
+        rid = str(round_id or "").strip()
+        if not rid:
+            return {"ok": False, "reason": "missing_round_id"}
+        if up_pct is None and down_pct is None and up_pool is None and down_pool is None:
+            return {"ok": False, "reason": "empty"}
+
+        # Normalize multipliers like 1.96 → 196 only when caller passed multipliers.
+        if up_pct is not None and down_pct is not None:
+            try:
+                u, d = float(up_pct), float(down_pct)
+                if 1.05 <= u <= 20 and 1.05 <= d <= 20:
+                    up_pct, down_pct = u * 100.0, d * 100.0
+            except (TypeError, ValueError):
+                pass
+
+        now = int(time.time() * 1000)
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT * FROM pool_snapshots WHERE round_id=?", (rid,)
+            ).fetchone()
+            if existing and int(existing["locked"] or 0) == 1:
+                # Allow DOM return-% to replace a WS/pool-derived lock once.
+                prev_src = str(existing["source"] or "")
+                if not (lock and source == "dom" and not prev_src.startswith("dom")):
+                    return {"ok": True, "locked": True, "skipped": True, "row": dict(existing)}
+
+            # Non-lock writes are pool-size only (no %); skip if nothing useful.
+            if not lock and up_pct is None and down_pct is None:
+                if existing is None and (up_pool is not None or down_pool is not None):
+                    pass  # allow first pool-only row
+                elif existing is not None:
+                    # Update pools on existing row without touching locked %.
+                    self._conn.execute(
+                        """
+                        UPDATE pool_snapshots SET
+                            up_pool=COALESCE(?, up_pool),
+                            down_pool=COALESCE(?, down_pool),
+                            countdown_sec=COALESCE(?, countdown_sec),
+                            captured_at=?
+                        WHERE round_id=? AND locked=0
+                        """,
+                        (up_pool, down_pool, countdown_sec, now, rid),
+                    )
+                    self._conn.commit()
+                    row = self._conn.execute(
+                        "SELECT * FROM pool_snapshots WHERE round_id=?", (rid,)
+                    ).fetchone()
+                    return {
+                        "ok": True,
+                        "locked": False,
+                        "skipped": False,
+                        "row": dict(row) if row else {},
+                    }
+
+            locked_i = 1 if lock else (int(existing["locked"]) if existing else 0)
+            if lock:
+                locked_i = 1
+
+            # On lock, force-replace % (do not keep older pool-derived values).
+            if lock and up_pct is not None and down_pct is not None:
+                self._conn.execute(
+                    """
+                    INSERT INTO pool_snapshots (
+                        round_id, symbol, label, up_pct, down_pct, up_pool, down_pool,
+                        countdown_sec, locked, source, captured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(round_id) DO UPDATE SET
+                        symbol=excluded.symbol,
+                        label=COALESCE(excluded.label, pool_snapshots.label),
+                        up_pct=excluded.up_pct,
+                        down_pct=excluded.down_pct,
+                        up_pool=COALESCE(excluded.up_pool, pool_snapshots.up_pool),
+                        down_pool=COALESCE(excluded.down_pool, pool_snapshots.down_pool),
+                        countdown_sec=excluded.countdown_sec,
+                        locked=1,
+                        source=excluded.source,
+                        captured_at=excluded.captured_at
+                    """,
+                    (
+                        rid,
+                        symbol,
+                        label,
+                        up_pct,
+                        down_pct,
+                        up_pool,
+                        down_pool,
+                        countdown_sec,
+                        locked_i,
+                        source,
+                        now,
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO pool_snapshots (
+                        round_id, symbol, label, up_pct, down_pct, up_pool, down_pool,
+                        countdown_sec, locked, source, captured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(round_id) DO UPDATE SET
+                        symbol=excluded.symbol,
+                        label=COALESCE(excluded.label, pool_snapshots.label),
+                        up_pct=COALESCE(excluded.up_pct, pool_snapshots.up_pct),
+                        down_pct=COALESCE(excluded.down_pct, pool_snapshots.down_pct),
+                        up_pool=COALESCE(excluded.up_pool, pool_snapshots.up_pool),
+                        down_pool=COALESCE(excluded.down_pool, pool_snapshots.down_pool),
+                        countdown_sec=COALESCE(excluded.countdown_sec, pool_snapshots.countdown_sec),
+                        locked=MAX(pool_snapshots.locked, excluded.locked),
+                        source=CASE
+                            WHEN excluded.up_pct IS NOT NULL OR excluded.down_pct IS NOT NULL
+                            THEN excluded.source
+                            ELSE pool_snapshots.source
+                        END,
+                        captured_at=excluded.captured_at
+                    """,
+                    (
+                        rid,
+                        symbol,
+                        label,
+                        up_pct,
+                        down_pct,
+                        up_pool,
+                        down_pool,
+                        countdown_sec,
+                        locked_i,
+                        source,
+                        now,
+                    ),
+                )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM pool_snapshots WHERE round_id=?", (rid,)
+            ).fetchone()
+            return {"ok": True, "locked": bool(locked_i), "skipped": False, "row": dict(row) if row else {}}
+
+    def get_pool_snapshot(self, round_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM pool_snapshots WHERE round_id=?", (str(round_id),)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_pool_snapshots(
+        self,
+        *,
+        symbol: str | None = None,
+        locked_only: bool = True,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE 1=1"
+        params: list[Any] = []
+        if symbol:
+            where += " AND s.symbol=?"
+            params.append(symbol)
+        if locked_only:
+            where += " AND s.locked=1"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT s.*, r.result, r.fee_rate, r.price_end_time, r.scraped_at
+                FROM pool_snapshots s
+                LEFT JOIN rounds r ON r.id = s.round_id
+                {where}
+                ORDER BY COALESCE(r.price_end_time, s.captured_at) ASC, s.captured_at ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def upsert_ticks(self, symbol: str, ticks: list[tuple[int, float]]) -> int:
         if not ticks:
             return 0
@@ -641,7 +932,7 @@ class Database:
                 f"""
                 SELECT * FROM rounds
                 {where}
-                ORDER BY CAST(id AS INTEGER) DESC
+                ORDER BY COALESCE(price_end_time, scraped_at) DESC, scraped_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 params,
@@ -663,12 +954,12 @@ class Database:
                        price_start_time, price_end_time, scraped_at, period_sec, label
                 FROM rounds
                 {where}
-                ORDER BY CAST(id AS INTEGER) DESC
+                ORDER BY COALESCE(price_end_time, scraped_at) DESC, scraped_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 params,
             ).fetchall()
-        # reverse to chronological
+        # reverse to chronological (oldest → newest)
         items = [dict(r) for r in reversed(rows)]
         for i, item in enumerate(items):
             sp = item.get("start_price")
@@ -780,9 +1071,12 @@ class Database:
 
         prediction = _predict_from_history(results)
         review = _prediction_review(results, seq)
+        db_settled = self.count_rounds(symbol=symbol, settled_only=True)
 
         return {
-            "total_settled": total,
+            "total_settled": db_settled,
+            "window_settled": total,
+            "window_limit": limit,
             "up_count": ups,
             "down_count": downs,
             "up_ratio": (ups / total) if total else 0.0,
@@ -797,7 +1091,7 @@ class Database:
             "streak_hist": streak_hist,
             "pattern": pattern,
             "chips": chips,
-            "recent_chips": chips[-80:],
+            "recent_chips": chips,
             "prediction": prediction,
             "prediction_review": review,
         }

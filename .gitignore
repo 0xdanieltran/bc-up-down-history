@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 data/*.db
 data/*.db-*
+data/browser_profile/
 .pytest_cache/
 _tmp/
 .env

@@ -51,8 +51,20 @@
     button:disabled { opacity: .55; cursor: wait; }
     .live {
       margin-left: auto; font-size: .82rem; color: var(--muted);
-      display: flex; align-items: center; gap: 8px;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     }
+    .countdown {
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      color: var(--text);
+      background: #0f151c;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 4px 9px;
+      min-width: 4.2rem;
+      text-align: center;
+    }
+    .countdown.refreshing { color: var(--up); border-color: rgba(34,197,94,.4); }
     .dot {
       width: 8px; height: 8px; border-radius: 50%; background: #666;
       box-shadow: 0 0 0 0 rgba(34,197,94,.5);
@@ -81,19 +93,69 @@
     .pattern-panel h2 { margin: 0; font-size: .95rem; color: var(--muted); font-weight: 600; }
     .pattern-meta { font-size: .8rem; color: var(--muted); }
     .chips {
-      display: flex; flex-wrap: wrap; gap: 5px;
-      align-content: flex-start;
-      min-height: 92px;
+      --chip: 30px;
+      --chip-gap: 6px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, var(--chip));
+      gap: var(--chip-gap);
+      align-content: start;
+      max-height: 500px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-right: 4px;
+      min-height: calc(3 * var(--chip) + 2 * var(--chip-gap));
     }
+    .chips::-webkit-scrollbar { width: 8px; }
+    .chips::-webkit-scrollbar-thumb {
+      background: #2a3644;
+      border-radius: 8px;
+    }
+    .chips::-webkit-scrollbar-track { background: transparent; }
     .chip {
-      width: 28px; height: 28px; border-radius: 7px;
-      display: grid; place-items: center;
-      font-size: .72rem; font-weight: 800; letter-spacing: .02em;
+      width: var(--chip);
+      height: var(--chip);
+      box-sizing: border-box;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      position: relative;
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .02em;
       user-select: none;
+      /* Reserve border so hit/miss/wait don't change cell size */
+      border: 2px solid transparent;
+      padding: 0;
+      margin: 0;
+      outline: none;
     }
-    .chip.up { background: var(--up-soft); color: var(--up); border: 1px solid rgba(34,197,94,.35); }
-    .chip.down { background: var(--down-soft); color: var(--down); border: 1px solid rgba(239,68,68,.35); }
-    .chip:hover { outline: 1px solid #fff3; transform: translateY(-1px); }
+    .chip.up { background: var(--up-soft); color: var(--up); border-color: rgba(34,197,94,.35); }
+    .chip.down { background: var(--down-soft); color: var(--down); border-color: rgba(239,68,68,.35); }
+    .chip:hover { filter: brightness(1.08); }
+    .chip .letter { line-height: 1; }
+    .chip .pred {
+      position: absolute;
+      bottom: -1px;
+      right: -1px;
+      min-width: 9px;
+      height: 10px;
+      font-size: .55rem;
+      line-height: 10px;
+      text-align: center;
+      font-weight: 800;
+      background: #0f151c;
+      border-radius: 3px;
+      padding: 0 2px;
+      box-sizing: border-box;
+    }
+    .chip .pred.up { color: var(--up); }
+    .chip .pred.down { color: var(--down); }
+    .chip .pred.wait { color: var(--muted); }
+    .chip .pred.spacer { visibility: hidden; } /* keep history cells identical footprint */
+    .chip.hit { border-color: rgba(34,197,94,.9); box-shadow: inset 0 0 0 1px rgba(34,197,94,.35); }
+    .chip.miss { border-color: rgba(239,68,68,.9); opacity: .9; box-shadow: inset 0 0 0 1px rgba(239,68,68,.3); }
+    .chip.skip { border-color: #556; border-style: dashed; opacity: .6; }
+    .chip.wait { border-color: #6b7280; border-style: dashed; opacity: .55; }
     .pattern-string {
       margin-top: 10px; font-family: ui-monospace, Consolas, monospace;
       font-size: .78rem; color: var(--muted); word-break: break-all;
@@ -178,13 +240,38 @@
       display: flex; flex-wrap: wrap; gap: 10px 16px;
     }
     .predict-meta strong { color: var(--text); font-weight: 650; }
-    .chip.hit { outline: 2px solid rgba(34,197,94,.85); }
-    .chip.miss { outline: 2px solid rgba(239,68,68,.85); opacity: .85; }
-    .chip.skip { outline: 2px dashed #556; opacity: .55; }
     .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: .75rem; color: var(--muted); }
     .legend span b { font-weight: 700; }
     .legend .hit { color: var(--up); }
     .legend .miss { color: var(--down); }
+    .legend .wait { color: #9ca3af; }
+
+    .sim-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .sim-meta {
+      display: flex; flex-wrap: wrap; gap: 10px 16px;
+      margin-top: 10px; font-size: .82rem; color: var(--muted);
+    }
+    .sim-meta strong { color: var(--text); }
+    .equity {
+      margin-top: 10px; height: 64px; display: flex; align-items: flex-end; gap: 1px;
+      border: 1px solid var(--line); border-radius: 8px; padding: 6px; background: #0d131a;
+    }
+    .equity i {
+      flex: 1; min-width: 2px; background: var(--up); opacity: .85; border-radius: 1px 1px 0 0;
+    }
+    .equity i.loss { background: var(--down); }
+    .live-odds {
+      display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: baseline;
+      margin-top: 8px; font-size: .9rem;
+    }
+    .live-odds .tag {
+      font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+    }
   </style>
 </head>
 <body>
@@ -204,8 +291,58 @@
       <button id="btnRefresh" class="ghost">Refresh</button>
       <button id="btnExportRounds" class="ghost">Export rounds CSV</button>
       <button id="btnExportPred" class="ghost">Export predictions CSV</button>
-      <div class="live"><span class="dot" id="dot"></span><span id="status">Loading…</span></div>
+      <div class="live">
+        <span class="countdown" id="countdown" title="Seconds until next dashboard refresh">—</span>
+        <span class="dot" id="dot"></span>
+        <span id="status">Loading…</span>
+      </div>
     </div>
+
+    <section class="pattern-panel">
+      <div class="head">
+        <h2>Live return % (Up/Down Wins · lock at center ~2–3s)</h2>
+        <div class="pattern-meta" id="oddsMeta">—</div>
+      </div>
+      <div class="live-odds" id="liveOdds">
+        <span class="tag">Waiting for collector…</span>
+      </div>
+    </section>
+
+    <section class="pattern-panel">
+      <div class="head">
+        <h2>Bankroll simulation</h2>
+        <div class="pattern-meta" id="simMeta">LIVE bets use prediction side’s return % (e.g. 196%) until you stop</div>
+      </div>
+      <div class="bar" style="margin:0;padding:0;border:0;background:transparent">
+        <label>Deposit ($)
+          <input id="simDeposit" type="number" min="1" step="1" value="20" />
+        </label>
+        <label>Stake / bet ($)
+          <input id="simStake" type="number" min="0.01" step="0.5" value="1" />
+        </label>
+        <button id="btnSimStart" type="button">Start live sim</button>
+        <button id="btnSimStop" type="button" class="stop" disabled>Stop sim</button>
+      </div>
+      <div class="sim-meta" id="simSummary">Win = scraped potential return for prediction side · Lose = −stake · runs until Stop.</div>
+      <div class="equity" id="simEquity" title="Balance path"></div>
+      <div class="table-wrap" style="margin-top:10px;max-height:260px">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Bet</th>
+              <th>Actual</th>
+              <th>UP %</th>
+              <th>DOWN %</th>
+              <th>Potential</th>
+              <th>Outcome</th>
+              <th>Balance</th>
+            </tr>
+          </thead>
+          <tbody id="simBody"></tbody>
+        </table>
+      </div>
+    </section>
 
     <section class="pattern-panel">
       <div class="head">
@@ -214,36 +351,6 @@
       </div>
       <div class="chips" id="chips"></div>
       <div class="pattern-string" id="patternString"></div>
-    </section>
-
-    <section class="pattern-panel">
-      <div class="head">
-        <h2>Prediction correctness (walk-forward)</h2>
-        <div class="pattern-meta" id="reviewMeta">—</div>
-      </div>
-      <div class="chips" id="reviewChips"></div>
-      <div class="legend">
-        <span>Letter = <b>actual</b> result</span>
-        <span class="hit">Green outline = HIT (model matched)</span>
-        <span class="miss">Red outline = MISS</span>
-        <span>Dashed = SKIP / NO TRADE</span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Actual</th>
-              <th>Predicted</th>
-              <th>Outcome</th>
-              <th>Start</th>
-              <th>End</th>
-              <th>Move</th>
-            </tr>
-          </thead>
-          <tbody id="reviewBody"></tbody>
-        </table>
-      </div>
     </section>
 
     <section class="predict" id="predict">
@@ -271,13 +378,74 @@
       </div>
     </section>
 
+    <section class="pattern-panel">
+      <div class="head">
+        <h2>Prediction correctness (walk-forward)</h2>
+        <div class="pattern-meta" id="reviewMeta">—</div>
+      </div>
+      <div class="chips" id="reviewChips"></div>
+      <div class="legend">
+        <span>Letter = <b>actual</b> result</span>
+        <span class="hit">Green outline = HIT (bet correct)</span>
+        <span class="miss">Red outline = MISS (bet wrong)</span>
+        <span class="wait">Dashed WAIT = warmup (first 100 rounds, no bet yet)</span>
+        <span class="wait">SKIP / NO TRADE = edge too small, no bet</span>
+        <span>Corner mark = predicted side (U/D) or —</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Actual</th>
+              <th>Predicted</th>
+              <th>Outcome</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Move</th>
+            </tr>
+          </thead>
+          <tbody id="reviewBody"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="stats" id="stats"></section>
   </div>
 
   <script>
+    const REFRESH_SEC = 2;
     let refreshTimer = null;
+    let countdownTimer = null;
+    let nextRefreshAt = 0;
+    let refreshing = false;
 
     const $ = (id) => document.getElementById(id);
+
+    function renderCountdown() {
+      const el = $("countdown");
+      if (!el) return;
+      if (refreshing) {
+        el.classList.add("refreshing");
+        el.textContent = "now";
+        return;
+      }
+      el.classList.remove("refreshing");
+      const left = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1000));
+      el.textContent = `${left}s`;
+    }
+
+    function scheduleNextRefresh() {
+      nextRefreshAt = Date.now() + REFRESH_SEC * 1000;
+      renderCountdown();
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refresh().catch(e => {
+          $("status").textContent = e.message;
+          scheduleNextRefresh();
+        });
+      }, REFRESH_SEC * 1000);
+    }
 
     function fmtPrice(v) {
       if (v == null || v === 0) return "—";
@@ -292,12 +460,14 @@
     }
 
     function renderChips(a) {
-      const chips = a.recent_chips || a.chips || [];
+      // Same sequence as prediction review (full chips, oldest → newest).
+      const chips = a.chips || a.recent_chips || [];
       $("chips").innerHTML = chips.map(c => {
         const cls = (c.result || "").toLowerCase();
         const letter = c.result === "UP" ? "U" : "D";
         const tip = `${c.result} | start ${fmtPrice(c.start_price)} → end ${fmtPrice(c.end_price)}`;
-        return `<div class="chip ${cls}" title="${tip}">${letter}</div>`;
+        // Spacer pred keeps cell footprint identical to review chips.
+        return `<div class="chip ${cls}" title="${tip}"><span class="letter">${letter}</span><span class="pred spacer">W</span></div>`;
       }).join("");
 
       const pat = a.pattern || "";
@@ -305,35 +475,53 @@
         .split("")
         .map(ch => `<span class="${ch}">${ch}</span>`)
         .join("");
-      $("patternMeta").textContent = `${chips.length} shown · ${a.total_settled} settled total · streak ${a.current_streak || 0} ${a.current_streak_side || ""}`;
+      $("patternMeta").textContent = `${chips.length} shown · ${a.total_settled ?? chips.length} settled total · streak ${a.current_streak || 0} ${a.current_streak_side || ""}`;
     }
 
     function renderReview(a) {
       const rev = a.prediction_review || {};
-      const chips = rev.chips || [];
+      const histLen = (a.chips || a.recent_chips || []).length;
+      // Align 1:1 with history chips (pad/truncate if lengths ever diverge).
+      let chips = [...(rev.chips || [])];
+      if (chips.length < histLen) {
+        for (let i = chips.length; i < histLen; i++) {
+          chips.push({ n: i + 1, actual: (a.chips || [])[i]?.result || "UP", predicted: null, outcome: "WAIT" });
+        }
+      } else if (chips.length > histLen && histLen > 0) {
+        chips = chips.slice(0, histLen);
+      }
       $("reviewChips").innerHTML = chips.map(c => {
         const actual = (c.actual || "").toLowerCase();
         const letter = c.actual === "UP" ? "U" : "D";
-        const oc = (c.outcome || "SKIP").toLowerCase();
-        const tip = `n=${c.n} actual=${c.actual} predicted=${c.predicted || "NO TRADE"} → ${c.outcome}`;
-        return `<div class="chip ${actual} ${oc}" title="${tip}">${letter}</div>`;
+        const oc = (c.outcome || "WAIT").toLowerCase();
+        let predMark = "—";
+        let predCls = "wait";
+        if (c.predicted === "UP") { predMark = "U"; predCls = "up"; }
+        else if (c.predicted === "DOWN") { predMark = "D"; predCls = "down"; }
+        else if (c.outcome === "WAIT") { predMark = "W"; predCls = "wait"; }
+        const tip = `n=${c.n} actual=${c.actual} predicted=${c.predicted || (c.outcome === "WAIT" ? "WAIT" : "NO TRADE")} → ${c.outcome}`;
+        return `<div class="chip ${actual} ${oc}" title="${tip}"><span class="letter">${letter}</span><span class="pred ${predCls}">${predMark}</span></div>`;
       }).join("");
       const rate = rev.hit_rate == null ? "—" : `${(rev.hit_rate * 100).toFixed(1)}%`;
+      const bets = rev.bets ?? rev.trials ?? ((rev.hits || 0) + (rev.misses || 0));
+      const today = summarizeToday(rev);
+      const todayBets = today.bets || 0;
+      const todayRate = fmtRate(today.hit_rate, today.hits, today.misses);
       $("reviewMeta").textContent =
-        `${chips.length} scored · hit ${rev.hits || 0} · miss ${rev.misses || 0} · skip ${rev.skips || 0} · hit rate ${rate}`;
+        `${chips.length} shown · bets ${bets} · today ${today.date}: ${todayBets} · hit ${rev.hits || 0} · miss ${rev.misses || 0} · skip ${rev.skips || 0} · hit rate ${rate} · today rate ${todayRate}`;
 
       const rows = [...(rev.rows || [])].reverse();
       $("reviewBody").innerHTML = rows.map(r => {
         const actualCls = (r.actual || "").toLowerCase();
-        const pred = r.predicted || "NO TRADE";
+        const pred = r.predicted || (r.outcome === "WAIT" ? "WAIT" : "NO TRADE");
         const predCls = r.predicted ? r.predicted.toLowerCase() : "wait";
-        const out = (r.outcome || "SKIP").toLowerCase();
+        const out = (r.outcome || "WAIT").toLowerCase();
         const move = r.move == null ? "—" : Number(r.move).toFixed(2);
         return `<tr>
           <td>${r.n}</td>
           <td><span class="pill ${actualCls}">${r.actual || "—"}</span></td>
           <td><span class="pill ${predCls}">${pred}</span></td>
-          <td><span class="pill ${out}">${r.outcome || "SKIP"}</span></td>
+          <td><span class="pill ${out}">${r.outcome || "WAIT"}</span></td>
           <td>${fmtPrice(r.start_price)}</td>
           <td>${fmtPrice(r.end_price)}</td>
           <td>${move}</td>
@@ -341,10 +529,82 @@
       }).join("");
     }
 
+    function fmtRate(hitRate, hits, misses) {
+      if (hitRate != null && Number.isFinite(Number(hitRate))) {
+        return `${(Number(hitRate) * 100).toFixed(1)}%`;
+      }
+      const h = hits || 0;
+      const m = misses || 0;
+      const n = h + m;
+      return n ? `${((h / n) * 100).toFixed(1)}%` : "—";
+    }
+
+    function localDayKey(ts) {
+      if (ts == null) return null;
+      let t = Number(ts);
+      if (!Number.isFinite(t) || t <= 0) return null;
+      if (t < 1e12) t *= 1000;
+      const d = new Date(t);
+      if (Number.isNaN(d.getTime())) return null;
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
+    function summarizeToday(rev) {
+      const todayKey = localDayKey(Date.now());
+      const byDay = Array.isArray(rev.by_day) ? rev.by_day : [];
+
+      const pick = (bucket) => {
+        if (!bucket) return null;
+        const hits = bucket.hits || 0;
+        const misses = bucket.misses || 0;
+        const bets = bucket.bets ?? (hits + misses);
+        if (!bets) return null;
+        return {
+          date: bucket.date || todayKey,
+          bets,
+          hits,
+          misses,
+          hit_rate: bucket.hit_rate != null ? bucket.hit_rate : hits / bets,
+        };
+      };
+
+      const fromApi = pick(rev.today && rev.today.date === todayKey ? rev.today : null)
+        || pick(byDay.find(d => d.date === todayKey));
+      if (fromApi) return fromApi;
+
+      let hits = 0, misses = 0;
+      for (const r of (rev.rows || [])) {
+        const day = r.day || localDayKey(r.ts);
+        if (day !== todayKey) continue;
+        if (r.outcome === "HIT") hits += 1;
+        else if (r.outcome === "MISS") misses += 1;
+      }
+      const bets = hits + misses;
+      if (bets) {
+        return { date: todayKey, bets, hits, misses, hit_rate: hits / bets };
+      }
+
+      // Fallback: most recent day that has bets (so rate is never blank when data exists).
+      const latest = pick(byDay[0]);
+      if (latest) return latest;
+
+      return { date: todayKey, bets: 0, hits: 0, misses: 0, hit_rate: null };
+    }
+
     function renderStats(a) {
       const t = a.transitions || {};
+      const rev = a.prediction_review || {};
+      const bets = rev.bets ?? rev.trials ?? ((rev.hits || 0) + (rev.misses || 0));
+      const today = summarizeToday(rev);
+      const todayRate = fmtRate(today.hit_rate, today.hits, today.misses);
       const cards = [
-        { k: "Settled", v: a.total_settled },
+        { k: "Settled (DB)", v: a.total_settled },
+        { k: "Bets (window)", v: bets },
+        { k: `Bets today (${today.date || "—"})`, v: `${today.bets || 0} · ${todayRate}` },
+        { k: "Today hit / miss", v: `${today.hits || 0} / ${today.misses || 0}` },
         { k: "UP", v: `${a.up_count} (${((a.up_ratio||0)*100).toFixed(1)}%)`, cls: "up" },
         { k: "DOWN", v: `${a.down_count} (${((a.down_ratio||0)*100).toFixed(1)}%)`, cls: "down" },
         { k: "Current streak", v: a.current_streak ? `${a.current_streak} ${a.current_streak_side}` : "—" },
@@ -386,42 +646,198 @@
 
       $("predictReasons").innerHTML = (p.reasons || []).map(r => `<li>${r}</li>`).join("");
       const hit = p.model_hit_rate == null ? "—" : `${(p.model_hit_rate * 100).toFixed(1)}% (${p.model_trials} trials)`;
+      const used = p.history_used != null ? p.history_used : "—";
+      const need = p.min_history != null ? p.min_history : 100;
       $("predictMeta").innerHTML = `
+        <span>Lookback: <strong>${used}</strong> / min ${need}</span>
         <span>Walk-forward hit rate: <strong>${hit}</strong></span>
         <span>Transition samples: <strong>${p.transition_samples ?? 0}</strong></span>
         <span>${p.disclaimer || "Pattern heuristic only."}</span>
       `;
     }
 
-    async function refresh() {
-      const symbol = $("symbol").value.trim() || "BTC/USD";
-      const [analytics, status] = await Promise.all([
-        api(`/api/analytics?symbol=${encodeURIComponent(symbol)}&limit=300`),
-        api("/api/scrape/status"),
-      ]);
-      renderChips(analytics);
-      renderReview(analytics);
-      renderPrediction(analytics);
-      renderStats(analytics);
+    function renderLiveOdds(status) {
+      const o = status.live_odds || null;
+      const lockedN = status.odds_locked_count ?? 0;
+      $("oddsMeta").textContent =
+        `${lockedN} locked · poll timer every 2s · save Up/Down Wins % only at 2–3s · settle after round`;
+      if (!o) {
+        $("liveOdds").innerHTML = `<span class="tag">No live return % yet — keep BC Up/Down open</span>`;
+        return;
+      }
+      const fmtPct = (v) => v == null ? "—" : `${Number(v).toFixed(0)}%`;
+      const cd = o.countdown_sec == null ? "—" : `${Number(o.countdown_sec).toFixed(1)}s`;
+      const lock = o.locked ? "LOCKED" : "watching";
+      const pot = (pct) => pct == null ? "—" : `$${(1 * Number(pct) / 100).toFixed(2)} if $1 wins`;
+      $("liveOdds").innerHTML = `
+        <span class="tag">Round</span><strong>${o.round_id || "—"}</strong>
+        <span class="tag">Center timer</span><strong>${cd}</strong>
+        <span class="up">UP ${fmtPct(o.up_pct)} <span class="tag">${pot(o.up_pct)}</span></span>
+        <span class="down">DOWN ${fmtPct(o.down_pct)} <span class="tag">${pot(o.down_pct)}</span></span>
+        <span class="tag">${lock}</span>
+        <span class="tag">${o.source || ""}</span>
+      `;
+    }
 
-      $("dot").classList.toggle("on", !!status.running);
-      $("btnStart").disabled = !!status.running;
-      $("btnStart").textContent = status.running ? "Collector running…" : "Start live collector";
-      if status.running) {
-        const last = (status.events || []).slice(-1)[0];
-        if (last?.type === "waiting_for_user") {
-          $("status").textContent = `Waiting for you in Chromium… (${last.buttons ?? 0} chips) — login / open Up-Down`;
-        } else if (status.last_error && String(status.last_error).toLowerCase().includes("frequent")) {
-          $("status").textContent = `Rate limited — waiting/retrying… (${status.rounds} settled)`;
-        } else {
-          $("status").textContent = last?.db_rounds != null
-            ? `Live · ${status.rounds} settled · last game ${last.game_id || "—"}`
-            : `Live collecting · ${status.rounds} settled · mode ${status.request?.mode || "html"}`;
+    let simTimer = null;
+    const SIM_TICK_MS = 2000;
+
+    function setSimControls(running) {
+      $("btnSimStart").disabled = !!running;
+      $("btnSimStop").disabled = !running;
+      $("simDeposit").disabled = !!running;
+      $("simStake").disabled = !!running;
+    }
+
+    function ensureSimTimer(running) {
+      if (running) {
+        if (!simTimer) {
+          simTimer = setInterval(() => { simTick().catch(() => {}); }, SIM_TICK_MS);
         }
-      } else if (status.last_error) {
-        $("status").textContent = `Stopped · ${status.last_error}`;
+      } else if (simTimer) {
+        clearInterval(simTimer);
+        simTimer = null;
+      }
+    }
+
+    function renderSimState(res) {
+      if (!res || (res.running === false && res.balance == null && !(res.equity || []).length)) {
+        return;
+      }
+      const running = !!res.running;
+      ensureSimTimer(running && !res.busted);
+      const bust = res.busted
+        ? `BUSTED after ${res.bets} bets`
+        : (running ? "LIVE · waiting for next round" : "stopped");
+      $("simMeta").textContent = running
+        ? `LIVE balance $${Number(res.balance).toFixed(2)} · prediction correctness × locked Up/Down Wins %`
+        : `Bets the same side as Prediction correctness · uses locked Up/Down Wins %`;
+      $("simSummary").innerHTML = `
+        <span>${running ? "<strong>LIVE</strong>" : "<strong>Idle</strong>"}</span>
+        <span>Balance <strong>$${Number(res.balance ?? res.deposit ?? 0).toFixed(2)}</strong></span>
+        <span>Deposit <strong>$${Number(res.deposit || 0).toFixed(2)}</strong> · stake <strong>$${Number(res.stake || 0).toFixed(2)}</strong></span>
+        <span>Bets <strong>${res.bets || 0}</strong> · W/L <strong>${res.wins || 0}/${res.losses || 0}</strong></span>
+        <span>Win rate <strong>${res.win_rate == null ? "—" : (res.win_rate * 100).toFixed(1) + "%"}</strong></span>
+        <span>Profit <strong>$${Number(res.profit || 0).toFixed(2)}</strong></span>
+        <span>Max DD <strong>${((res.max_drawdown || 0) * 100).toFixed(1)}%</strong></span>
+        <span>${bust}</span>
+        <span>${res.message || ""}</span>
+      `;
+      const eq = res.equity || [];
+      const deposit = Number(res.deposit || 20);
+      const bals = eq.map(e => e.balance);
+      const maxB = Math.max(deposit, ...bals, 1);
+      $("simEquity").innerHTML = eq.slice(-200).map(e => {
+        const h = Math.max(2, Math.round((e.balance / maxB) * 52));
+        const cls = e.outcome === "LOSS" ? "loss" : "";
+        return `<i class="${cls}" style="height:${h}px" title="#${e.n} ${e.bet}→${e.result} ${e.outcome} $${e.balance}"></i>`;
+      }).join("");
+      const rows = [...eq].reverse().slice(0, 80);
+      $("simBody").innerHTML = rows.map(r => `
+        <tr>
+          <td>${r.n}</td>
+          <td><span class="pill ${(r.bet || "").toLowerCase()}">${r.bet || "—"}</span></td>
+          <td><span class="pill ${(r.result || "").toLowerCase()}">${r.result || "—"}</span></td>
+          <td>${r.up_pct != null ? Number(r.up_pct).toFixed(0) + "%" : "—"}</td>
+          <td>${r.down_pct != null ? Number(r.down_pct).toFixed(0) + "%" : "—"}</td>
+          <td>${r.potential_return != null ? "$" + Number(r.potential_return).toFixed(2) : "—"}</td>
+          <td><span class="pill ${r.outcome === "WIN" ? "hit" : r.outcome === "LOSS" ? "miss" : "wait"}">${r.outcome}</span></td>
+          <td>$${Number(r.balance).toFixed(2)}</td>
+        </tr>
+      `).join("");
+      if (res.busted || !running) {
+        ensureSimTimer(false);
+        setSimControls(false);
       } else {
-        $("status").textContent = `${analytics.total_settled} settled in SQLite — click Start if needed`;
+        setSimControls(true);
+      }
+    }
+
+    async function simTick() {
+      try {
+        const res = await api("/api/simulate/live/tick", { method: "POST" });
+        renderSimState(res);
+        if (!res.running || res.busted) {
+          if (simTimer) { clearInterval(simTimer); simTimer = null; }
+        }
+      } catch (e) {
+        $("simSummary").textContent = e.message || String(e);
+      }
+    }
+
+    async function startLiveSim() {
+      const symbol = $("symbol").value.trim() || "BTC/USD";
+      try {
+        const res = await api("/api/simulate/live/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol,
+            deposit: Number($("simDeposit").value || 20),
+            stake: Number($("simStake").value || 1),
+            fee_rate: 0,
+            limit: 5000,
+          }),
+        });
+        renderSimState(res);
+        if (simTimer) clearInterval(simTimer);
+        simTimer = setInterval(() => { simTick().catch(() => {}); }, SIM_TICK_MS);
+        simTick().catch(() => {});
+      } catch (e) {
+        $("simSummary").textContent = e.message || String(e);
+      }
+    }
+
+    async function stopLiveSim() {
+      try {
+        const res = await api("/api/simulate/live/stop", { method: "POST" });
+        if (simTimer) { clearInterval(simTimer); simTimer = null; }
+        renderSimState(res);
+        setSimControls(false);
+      } catch (e) {
+        $("simSummary").textContent = e.message || String(e);
+      }
+    }
+
+    async function refresh() {
+      refreshing = true;
+      renderCountdown();
+      try {
+        const symbol = $("symbol").value.trim() || "BTC/USD";
+        const [analytics, status, sim] = await Promise.all([
+          api(`/api/analytics?symbol=${encodeURIComponent(symbol)}&limit=5000`),
+          api("/api/scrape/status"),
+          api("/api/simulate/live/tick", { method: "POST" }).catch(() => null),
+        ]);
+        renderChips(analytics);
+        renderReview(analytics);
+        renderPrediction(analytics);
+        renderStats(analytics);
+        renderLiveOdds(status);
+        if (sim) renderSimState(sim);
+
+        $("dot").classList.toggle("on", !!status.running);
+        $("btnStart").disabled = !!status.running;
+        $("btnStart").textContent = status.running ? "Collector running…" : "Start live collector";
+        if (status.running) {
+          const last = (status.events || []).slice(-1)[0];
+          if (last?.type === "waiting_for_user") {
+            $("status").textContent = `Waiting for you in Chromium… (${last.buttons ?? 0} chips) — login / open Up-Down`;
+          } else if (status.last_error && String(status.last_error).toLowerCase().includes("frequent")) {
+            $("status").textContent = `Rate limited — waiting/retrying… (${status.rounds} settled)`;
+          } else {
+            $("status").textContent = last?.db_rounds != null
+              ? `Live · ${status.rounds} settled · last game ${last.game_id || "—"}`
+              : `Live collecting · ${status.rounds} settled · mode ${status.request?.mode || "html"}`;
+          }
+        } else if (status.last_error) {
+          $("status").textContent = `Stopped · ${status.last_error}`;
+        } else {
+          $("status").textContent = `${analytics.total_settled} settled in SQLite — click Start if needed`;
+        }
+      } finally {
+        refreshing = false;
+        scheduleNextRefresh();
       }
     }
 
@@ -433,9 +849,25 @@
       window.location.href = path;
     }
 
-    $("btnRefresh").onclick = () => refresh().catch(e => $("status").textContent = e.message);
+    $("btnRefresh").onclick = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refresh().catch(e => {
+        $("status").textContent = e.message;
+        scheduleNextRefresh();
+      });
+    };
     $("btnExportRounds").onclick = () => exportCsv("rounds");
     $("btnExportPred").onclick = () => exportCsv("predictions");
+    $("btnSimStart").onclick = () => startLiveSim();
+    $("btnSimStop").onclick = () => stopLiveSim();
+    setSimControls(false);
+    api("/api/simulate/live/status").then((res) => {
+      renderSimState(res);
+      if (res && res.running && !res.busted) {
+        ensureSimTimer(true);
+        simTick().catch(() => {});
+      }
+    }).catch(() => {});
     $("btnStart").onclick = async () => {
       try {
         const st = await api("/api/scrape/status");
@@ -465,8 +897,13 @@
       $("status").textContent = "Stop requested…";
     };
 
-    refresh().catch(e => $("status").textContent = e.message);
-    refreshTimer = setInterval(() => refresh().catch(console.error), 27000);
+    countdownTimer = setInterval(renderCountdown, 250);
+    refreshing = true;
+    renderCountdown();
+    refresh().catch(e => {
+      $("status").textContent = e.message;
+      scheduleNextRefresh();
+    });
   </script>
 </body>
 </html>

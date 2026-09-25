@@ -6,6 +6,8 @@ import csv
 import io
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,8 @@ from pydantic import BaseModel, Field
 from .db import Database
 from .html_scraper import scrape_html_history
 from .scraper import DetradeClient, RateLimitedError, scrape_live_history
+from .simulate import simulate_bankroll
+from .odds_parse import settle_one_bet, ENTRY_FEE
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -39,7 +43,79 @@ _scrape_state: dict[str, Any] = {
     "last_error": None,
     "events": [],
     "request": None,
+    "live_odds": None,
 }
+
+_sim_lock = threading.Lock()
+_sim_session: dict[str, Any] | None = None
+
+
+def _playable_prediction_rows(symbol: str, limit: int = 5000) -> list[dict[str, Any]]:
+    """Settled rounds that have a walk-forward prediction AND a locked $1 payout."""
+    data = db.analytics_summary(symbol=symbol, limit=limit)
+    review = (data.get("prediction_review") or {}).get("rows") or []
+    snaps = {
+        str(s["round_id"]): s
+        for s in db.list_pool_snapshots(symbol=symbol, locked_only=True, limit=limit)
+    }
+    playable: list[dict[str, Any]] = []
+    for r in review:
+        pred = r.get("predicted")
+        actual = r.get("actual")
+        rid = str(r.get("id") or "")
+        snap = snaps.get(rid)
+        if pred not in ("UP", "DOWN") or actual not in ("UP", "DOWN") or not snap:
+            continue
+        if snap.get("up_pct") is None or snap.get("down_pct") is None:
+            continue
+        playable.append(
+            {
+                "id": rid,
+                "round_id": rid,
+                "predicted": pred,
+                "actual": actual,
+                "result": actual,
+                "up_pct": snap.get("up_pct"),
+                "down_pct": snap.get("down_pct"),
+                "up_pool": snap.get("up_pool"),
+                "down_pool": snap.get("down_pool"),
+                "fee_rate": snap.get("fee_rate"),
+            }
+        )
+    return playable
+
+
+def _sim_public(session: dict[str, Any] | None) -> dict[str, Any]:
+    if not session:
+        return {"running": False}
+    deposit = float(session["deposit"])
+    balance = float(session["balance"])
+    equity = session["equity"]
+    wins = session["wins"]
+    losses = session["losses"]
+    bets = wins + losses
+    peak = float(session["peak"])
+    return {
+        "running": bool(session["running"]),
+        "busted": bool(session["busted"]),
+        "deposit": deposit,
+        "stake": float(session["stake"]),
+        "fee_rate": float(session["fee_rate"]),
+        "symbol": session["symbol"],
+        "balance": round(balance, 4),
+        "profit": round(balance - deposit, 4),
+        "roi": round((balance - deposit) / deposit, 4) if deposit else None,
+        "bets": bets,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / bets, 4) if bets else None,
+        "peak_balance": round(peak, 4),
+        "max_drawdown": round(session["max_drawdown"], 4),
+        "started_at": session["started_at"],
+        "waiting_for_round": bool(session["running"] and not session["busted"]),
+        "equity": equity,
+        "last_bet": equity[-1] if equity else None,
+    }
 
 
 class ScrapeRequest(BaseModel):
@@ -194,6 +270,8 @@ def scrape_status() -> dict[str, Any]:
         "events": _scrape_state["events"][-40:],
         "rounds": db.count_rounds(settled_only=True),
         "request": _scrape_state.get("request"),
+        "live_odds": _scrape_state.get("live_odds"),
+        "odds_locked_count": len(db.list_pool_snapshots(locked_only=True, limit=100_000)),
     }
 
 
@@ -213,6 +291,12 @@ async def _run_scrape(body: ScrapeRequest) -> None:
             _scrape_state["events"].append(evt)
             if len(_scrape_state["events"]) > 120:
                 _scrape_state["events"] = _scrape_state["events"][-120:]
+            if evt.get("type") == "odds":
+                src = str(evt.get("source") or "")
+                # Live UI shows DOM Up/Down Wins % only — never let WS/pool overwrite it.
+                if src != "dom":
+                    return
+                _scrape_state["live_odds"] = evt
 
         try:
             if mode == "html":
@@ -421,9 +505,197 @@ async def scrape_stop() -> dict[str, Any]:
     return {"ok": True, "message": "Stop requested (finishes current WS chunk)"}
 
 
+@app.get("/api/odds")
+def list_odds(
+    symbol: str | None = "BTC/USD",
+    locked_only: bool = True,
+    limit: int = Query(5000, ge=1, le=100_000),
+) -> dict[str, Any]:
+    rows = db.list_pool_snapshots(symbol=symbol, locked_only=locked_only, limit=limit)
+    return {
+        "count": len(rows),
+        "locked_only": locked_only,
+        "live": _scrape_state.get("live_odds"),
+        "items": rows,
+    }
+
+
+class SimulateRequest(BaseModel):
+    symbol: str = "BTC/USD"
+    deposit: float = Field(default=20.0, gt=0, le=1_000_000)
+    stake: float = Field(default=1.0, gt=0, le=1_000_000)
+    fee_rate: float = Field(
+        default=0.0,
+        ge=0,
+        le=0.5,
+        description="Unused — win pays scraped potential return; loss loses full stake",
+    )
+    limit: int = Field(default=5000, ge=10, le=100_000)
+
+
+@app.post("/api/simulate/bankroll")
+def simulate_bankroll_api(body: SimulateRequest) -> dict[str, Any]:
+    """One-shot historical backtest (prediction correctness × locked payouts)."""
+    playable = _playable_prediction_rows(body.symbol, body.limit)
+    result = simulate_bankroll(
+        playable,
+        deposit=body.deposit,
+        stake=body.stake,
+        fee_rate=body.fee_rate,
+    )
+    result["playable_rounds"] = len(playable)
+    result["locked_snapshots"] = len(
+        db.list_pool_snapshots(symbol=body.symbol, locked_only=True, limit=body.limit)
+    )
+    return result
+
+
+@app.post("/api/simulate/live/start")
+def simulate_live_start(body: SimulateRequest) -> dict[str, Any]:
+    """
+    Start a real-time sim: ignore past rounds, bet each NEW settled prediction
+    with locked $1 payout until stop or bust.
+    """
+    global _sim_session
+    existing = _playable_prediction_rows(body.symbol, body.limit)
+    seen = {str(r["round_id"]) for r in existing}
+    with _sim_lock:
+        _sim_session = {
+            "running": True,
+            "busted": False,
+            "symbol": body.symbol,
+            "deposit": float(body.deposit),
+            "stake": float(body.stake),
+            "fee_rate": float(body.fee_rate),
+            "balance": float(body.deposit),
+            "peak": float(body.deposit),
+            "max_drawdown": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "equity": [],
+            "seen_ids": seen,
+            "started_at": int(time.time() * 1000),
+            "limit": body.limit,
+        }
+        pub = _sim_public(_sim_session)
+    pub["ok"] = True
+    pub["message"] = (
+        f"Live sim started at ${body.deposit:.2f}. "
+        f"Ignoring {len(seen)} past playable rounds — waiting for the next settled bet."
+    )
+    return pub
+
+
+@app.post("/api/simulate/live/stop")
+def simulate_live_stop() -> dict[str, Any]:
+    global _sim_session
+    with _sim_lock:
+        if _sim_session:
+            _sim_session["running"] = False
+        pub = _sim_public(_sim_session)
+    pub["ok"] = True
+    pub["message"] = "Live sim stopped"
+    return pub
+
+
+@app.get("/api/simulate/live/status")
+def simulate_live_status() -> dict[str, Any]:
+    with _sim_lock:
+        return _sim_public(_sim_session)
+
+
+@app.post("/api/simulate/live/tick")
+def simulate_live_tick() -> dict[str, Any]:
+    """Apply any newly settled prediction+payout rounds since last tick."""
+    global _sim_session
+    with _sim_lock:
+        if not _sim_session or not _sim_session["running"] or _sim_session["busted"]:
+            pub = _sim_public(_sim_session)
+            pub["ok"] = True
+            pub["new_bets"] = []
+            return pub
+
+        session = _sim_session
+        symbol = session["symbol"]
+        stake = float(session["stake"])
+        fee_default = float(session["fee_rate"])
+        seen: set[str] = session["seen_ids"]
+        limit = int(session.get("limit") or 5000)
+
+    playable = _playable_prediction_rows(symbol, limit)
+    newcomers = [r for r in playable if str(r["round_id"]) not in seen]
+    new_bets: list[dict[str, Any]] = []
+
+    with _sim_lock:
+        if not _sim_session or not _sim_session["running"]:
+            pub = _sim_public(_sim_session)
+            pub["ok"] = True
+            pub["new_bets"] = []
+            return pub
+        session = _sim_session
+        for row in newcomers:
+            rid = str(row["round_id"])
+            if rid in session["seen_ids"]:
+                continue
+            session["seen_ids"].add(rid)
+            if session["busted"] or float(session["balance"]) < stake:
+                session["busted"] = True
+                session["running"] = False
+                break
+            fee = row.get("fee_rate")
+            fee_f = float(fee) if fee is not None else fee_default
+            settled = settle_one_bet(
+                balance=float(session["balance"]),
+                stake=stake,
+                predicted=row["predicted"],
+                result=row["result"],
+                up_pct=float(row["up_pct"]),
+                down_pct=float(row["down_pct"]),
+                fee_rate=fee_f,
+                up_pool=row.get("up_pool"),
+                down_pool=row.get("down_pool"),
+                round_id=rid,
+                bet_n=len(session["equity"]) + 1,
+            )
+            session["balance"] = settled["balance"]
+            peak = max(float(session["peak"]), float(session["balance"]))
+            session["peak"] = peak
+            dd = (peak - float(session["balance"])) / peak if peak > 0 else 0.0
+            session["max_drawdown"] = max(float(session["max_drawdown"]), dd)
+            if settled["row"]["outcome"] == "WIN":
+                session["wins"] += 1
+            else:
+                session["losses"] += 1
+            session["equity"].append(settled["row"])
+            new_bets.append(settled["row"])
+            if float(session["balance"]) < stake:
+                session["busted"] = True
+                session["running"] = False
+                break
+        pub = _sim_public(session)
+    pub["ok"] = True
+    pub["new_bets"] = new_bets
+    if new_bets:
+        pub["message"] = f"Applied {len(new_bets)} new bet(s)"
+    elif pub.get("busted"):
+        pub["message"] = "Busted — balance below stake"
+    elif pub.get("running"):
+        pub["message"] = "Waiting for next settled round…"
+    else:
+        pub["message"] = "Stopped"
+    return pub
+
+
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    # Avoid sticky browser cache of inline JS (limit, today stats, etc.).
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

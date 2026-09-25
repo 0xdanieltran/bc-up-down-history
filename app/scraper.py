@@ -366,6 +366,26 @@ async def scrape_live_history(
                         if not isinstance(resp, dict):
                             continue
 
+                        if "amountPool" in cmd:
+                            from .html_scraper import _pool_fields_from_resp
+
+                            _, _, up_pool, down_pool = _pool_fields_from_resp(resp)
+                            rid = str(resp.get("id") or resp.get("gameId") or last_game_id or "").strip()
+                            if rid and (up_pool is not None or down_pool is not None):
+                                db.upsert_pool_snapshot(
+                                    round_id=rid,
+                                    symbol=period.symbol,
+                                    label=period.label,
+                                    up_pct=None,
+                                    down_pct=None,
+                                    up_pool=up_pool,
+                                    down_pool=down_pool,
+                                    countdown_sec=None,
+                                    lock=False,
+                                    source="api_ws_amountPool",
+                                )
+                            continue
+
                         # Only contest game tickers carry round history / settlement.
                         if cmd.endswith("/ticker") and "contest" in cmd and "/kline/" not in cmd:
                             hist = resp.get("previousRoundResult") or []
